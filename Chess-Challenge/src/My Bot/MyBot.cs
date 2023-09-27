@@ -5,6 +5,10 @@ public class MyBot : IChessBot
 {
     Board board;
     Move bestMove;
+    Timer timer;
+
+    ulong[] mg_eg_eval = {0, 18091310594175943473, 17729576757067842557, 17656368983588407033, 17583463653149966323, 18018903217143742195, 17659472831562776815, 0, 14698007690075952301, 17871161878745771228, 1595470717666860777, 795204270349158652, 18161338403160326906, 17873669855958727925, 17868322896468436722, 17723902009547159244, 18159617559699587826, 16791984640099813619, 18379780590394479352, 18375550773540487934, 145529233262118653, 362835568813868800, 4514607629076226, 17793153658603044848, 1517436131058128144, 1588962699736059917, 584929225523137022, 17797118570917002228, 17655233157860619246, 17365317221659243754, 15995946953292052714, 17576989728702528247, 1591202357256782066, 1949527540192177652, 2024117404048816378, 71784919331304435, 18375248330046108668, 146087707640791545, 71783832839650543, 16713409042533119744, 432890805913914336, 17504927689204957198, 17657211123293818108, 17220063970245408504, 16713116507612315880, 17580348611667294713, 289629968034169600, 508046960822194937, 0, 6724510076046890585, 3037988131755930159, 578715846390975504, 559642794984454, 18158792973527876354, 18230852792426431494, 0, 14979522056100179427, 16642195890504006900, 17075393589196224244, 17799357172263092728, 17798797507976297975, 17723633780620591093, 16930709953524266731, 16206194419948709874, 17652136907279955705, 18014111536846733052, 144119581827464193, 72344596705051903, 18230295327213486589, 18013555209917497338, 17580359705954220025, 17942051730983615733, 145247710940300550, 73185688757339653, 18446461507844899587, 72057598333288706, 18157667065048334849, 17941490980087529726, 18445614858104798717, 17727007052112396796, 721993266920885244, 4235443680840440, 290782441826943990, 1304940102892129025, 798000315483361015, 145531376283153400, 17361084063237142005, 17075100014892937968, 17870855050137956315, 363405120148801786, 438562246038849541, 75734416974679036, 18087594154091282167, 18159366965993799671, 17941780194679520243, 17002489315235131366};
+    int[,,,] pestos_eval = new int[2,6,2,64];
 
     struct TTable {
         public ulong hash;
@@ -22,21 +26,32 @@ public class MyBot : IChessBot
     const int entries = 2 << 20;
     TTable[] table = new TTable[entries];
 
-    int[] values = {1, 3, 3, 5, 9};
-    int val(bool white) {
-        int count = 0;
-        for(var i=1; i < 6; i++) {
-            count += board.GetPieceList((PieceType)i, white).Count * values[i-1];
-        }
-        return count;
-    }
+    int[] game_phase_inc = {0,1,1,2,4,0};
+    int val() {
+        int game_phase = 0;
+        int[] mg = {0, 0}, eg = {0, 0};
 
-    int evaluation() {
-        return val(true) - val(false);
+        for(int i=0; i<2; i++) {
+            for(var pc = PieceType.Pawn; pc <= PieceType.King; pc++) {
+                ulong mask = board.GetPieceBitboard(pc, i == 0);
+                int p = (int)pc-1;
+                while(mask != 0) {
+                    game_phase += game_phase_inc[p];
+                    int index = BitboardHelper.ClearAndGetIndexOfLSB(ref mask);
+                    mg[i] += pestos_eval[0, p, i, index];
+                    eg[i] += pestos_eval[1, p, i, index];
+                }
+            }
+        }
+
+        game_phase = Math.Max(game_phase, 24);
+        int eg_phase = 24 - game_phase;
+        
+        return ((mg[0] - mg[1]) * game_phase + (eg[0] - eg[1]) * eg_phase) / 24;
     }
 
     int quiescence(int alpha, int beta) {
-        int stand_pat = evaluation();
+        int stand_pat = val();
         if(!board.IsWhiteToMove) stand_pat = -stand_pat;
 
         if(stand_pat >= beta) return beta;
@@ -62,8 +77,8 @@ public class MyBot : IChessBot
 
         for(int i=0; i<moves.Length; i++) {
 
-            if(entry.best_move == moves[i]) scores[i] = ((int)1e7, i).ToTuple();
-            else if(moves[i].IsCapture) scores[i] = (7 + (int)moves[i].CapturePieceType - (int)moves[i].MovePieceType, i).ToTuple();
+            if(entry.best_move == moves[i]) scores[i] = (10000000, i).ToTuple();
+            else if(moves[i].IsCapture) scores[i] = (7 + (int)(moves[i].CapturePieceType - moves[i].MovePieceType), i).ToTuple();
             else scores[i] = (0, i).ToTuple();
         }
         
@@ -73,8 +88,8 @@ public class MyBot : IChessBot
     }
 
     int search(int depth, int alpha, int beta, bool root) {
-        if(board.IsInCheckmate()) return (int)-1e7;
-        else if(board.IsInStalemate()) return 0;
+        if(board.IsInCheckmate()) return -100000001;
+        else if(board.IsDraw()) return 0;
 
         ulong hash = board.ZobristKey;
         TTable entry = table[hash % entries];
@@ -97,12 +112,11 @@ public class MyBot : IChessBot
 
         if(root) bestMove = moves[0];
 
-        int _alpha = alpha;
-
-        int max_eval = (int)-1e7;
+        int max_eval = -100000000, _alpha = alpha, eval, bound;
         foreach(var index in sorted) {
+            if(timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 30) return 100000;
             board.MakeMove(moves[index.Item2]);
-            int eval = -search(depth - 1, -beta, -alpha, false);
+            eval = -search(depth - 1, -beta, -alpha, false);
             board.UndoMove(moves[index.Item2]);
 
             if(eval > max_eval) {
@@ -117,26 +131,42 @@ public class MyBot : IChessBot
             }
         }
 
-        int bound = max_eval>= beta ? 2 : max_eval > _alpha ? 3 : 1;
+        bound = max_eval>= beta ? 2 : max_eval > _alpha ? 3 : 1;
         table[hash % entries] = new TTable(hash, bestMove, max_eval, depth, bound);
 
         return max_eval;
     }
 
-    public Move Think(Board b, Timer timer)
+    public Move Think(Board b, Timer t)
     {
         board = b;
+        timer = t;
+        bestMove = Move.NullMove;
 
-        int i = 0;
-        for(; i<100; i++) {
-            search(i, (int)-1e7, (int)1e7, true);
+        // ulong mask = board.GetPieceBitboard(1, true);
+        // Console.WriteLine();
 
-            if(timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 100)
+        int[,] mg_eg_value = {{82, 337, 365, 477, 1025, 0}, {94, 281, 297, 512, 936, 0}};
+
+        int i=0;
+        for(; i<2; i++) 
+            for(int j=0; j<6; j++)
+                for(int k=0; k<8; k++)
+                    for(int x=0; x<8; x++) {
+                        int val = (int)(sbyte)(mg_eg_eval[i*6*8 + j*8 + k] >> x*8) * 2 + mg_eg_value[i, j];
+                        pestos_eval[i, j, 0, (k*8+x)^56] = val;
+                        pestos_eval[i, j, 1, k*8+x] = val;
+                    }
+
+        
+        for(i=1; i<100; i++) {
+            search(i, -100000000, 100000000, true);
+
+            if(timer.MillisecondsElapsedThisTurn >= timer.MillisecondsRemaining / 30)
                 break;
         }   
 
-        Console.WriteLine(i);
 
-        return bestMove;
+        return bestMove == Move.NullMove? board.GetLegalMoves()[0] : bestMove;
     }
 }
